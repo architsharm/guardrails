@@ -190,3 +190,55 @@ def test_pyproject_force_includes_the_migrations_in_the_wheel():
     included = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
     assert included["migrations"] == "agentfox/_migrations"
     assert included["alembic.ini"] == "agentfox/_alembic.ini"
+
+
+# ---------------------------------------------------------------------------
+# and the Docker build context carries them too
+# ---------------------------------------------------------------------------
+
+
+def test_every_dockerfile_that_installs_the_package_copies_the_forced_includes():
+    """A force-include is a hard requirement of the build, not a nice-to-have.
+
+    Adding `migrations`/`alembic.ini` to the wheel made `pip install .` fail
+    anywhere those paths are absent from the build context. `deploy/Dockerfile`
+    copies `pyproject.toml`, `README.md` and `src` and nothing else, so the
+    gateway image stopped building the moment this merged:
+
+        FileNotFoundError: Forced include not found: /app/alembic.ini
+        ERROR: failed to solve: process "... pip install .[postgres,otel,classifiers]"
+
+    The local wheel builds all passed, because the repository root has every
+    path by definition. Only a build from a narrower context sees it — and CI's
+    docker-smoke targets `deps`, which is the stage that runs the install.
+
+    This is the same finding the Dockerfile already cites at its `deps` stage
+    ("COPY paths pointing at directories that don't exist in the repo"),
+    arriving from the other side: the COPY list is now short, not wrong.
+    """
+    import re
+    import tomllib
+
+    from agentfox.config import REPO_ROOT
+
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    forced = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+
+    installs_the_package = re.compile(r"pip install\s+[\"']?\.")
+    checked = 0
+    for dockerfile in sorted(REPO_ROOT.glob("deploy/Dockerfile*")):
+        text = dockerfile.read_text()
+        if not installs_the_package.search(text):
+            continue
+        checked += 1
+        copied = " ".join(
+            line for line in text.splitlines() if line.startswith("COPY")
+        )
+        for source in forced:
+            assert re.search(rf"(?<![\w/.-]){re.escape(source)}(?![\w/.-])", copied), (
+                f"{dockerfile.name} runs `pip install .` but never COPYs "
+                f"{source!r}, which pyproject force-includes into the wheel. "
+                "The build fails with 'Forced include not found'."
+            )
+
+    assert checked, "no Dockerfile installs the package — did the deploy move?"

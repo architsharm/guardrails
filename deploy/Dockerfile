@@ -29,6 +29,17 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./
+# alembic.ini and migrations/ are force-included into the wheel (see
+# pyproject.toml), so the build fails outright without them — "Forced include
+# not found: /app/alembic.ini". They also have to be here on their own merit:
+# this image's own CMD comment sends schema upgrades through `agentfox db
+# upgrade`, and until the wheel carried the migration scripts that command
+# could not run inside the container at all.
+#
+# Before `src`, deliberately: migrations change far less often, so the install
+# layer stays cached across ordinary source edits.
+COPY alembic.ini ./
+COPY migrations ./migrations
 COPY src ./src
 
 # `postgres`/`otel` for the compose stack, `classifiers` (transformers + torch) for
